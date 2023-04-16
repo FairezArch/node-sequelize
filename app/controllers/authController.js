@@ -49,6 +49,7 @@ const register = async (req, res) => {
 }
 
 const login = async (req, res) => {
+    const cookies = req.cookies;
     const { email, password } = req.body
 
     if (!email || !password) return res.status(422).json({
@@ -82,7 +83,11 @@ const login = async (req, res) => {
                 refreshSecret,
                 { expiresIn: '1d' }
             );
-           
+
+            if (cookies?.jwt) {
+                res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: secureHTTP == "true" ? true : false })
+            }
+
             findUser.refreshToken = refreshToken
             await findUser.save()
 
@@ -97,7 +102,7 @@ const login = async (req, res) => {
                     }
                 }
             })
-            
+
             res.status(200).send({
                 'status': true,
                 'message': 'success',
@@ -142,11 +147,29 @@ const handleRefreshToken = async (req, res) => {
     if (!cookies?.jwt) return res.sendStatus(401)
 
     const tokenCookie = cookies.jwt
+    res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: secureHTTP == "true" ? true : false })
+
     const findUser = await User.findOne({ where: { refreshToken: { [Op.eq]: tokenCookie } } })
-    if (!findUser) return res.sendStatus(403)
+    if (!findUser) {
+        jwt.verify(
+            tokenCookie,
+            refreshSecret,
+            async (err, decoded) => {
+                if (err) return res.sendStatus(403); //Forbidden
+                const hackedUser = await User.findOne({ where: { username: { [Op.eq]: decoded.username } } })
+                hackedUser.refreshToken = null;
+                await hackedUser.save();
+            }
+        )
+        return res.sendStatus(403); //Forbidden
+    }
 
     //evaluate jwt
-    jwt.verify(tokenCookie, refreshSecret, (err, decoded) => {
+    jwt.verify(tokenCookie, refreshSecret, async (err, decoded) => {
+        if (err) {
+            findUser.refreshToken = null
+            await findUser.save();
+        }
         if (err || findUser.username !== decoded.username) return res.sendStatus(403); //Invalid Token
 
         const accessToken = jwt.sign(
@@ -156,6 +179,21 @@ const handleRefreshToken = async (req, res) => {
             tokenSecret,
             { expiresIn: '30s' }
         )
+
+        const newRefreshToken = jwt.sign(
+            {
+                "user": { "username": findUser.username, }
+            },
+            refreshSecret,
+            { expiresIn: '1d' }
+        );
+
+        findUser.refreshToken = newRefreshToken
+        await findUser.save()
+
+        // Creates Secure Cookie with refresh token
+        res.cookie('jwt', newRefreshToken, { httpOnly: true, secure: secureHTTP == "true" ? true : false, sameSite: 'None', maxAge: 24 * 60 * 60 * 1000 });
+
         res.json({ accessToken })
     });
 }
